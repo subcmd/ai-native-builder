@@ -1,2 +1,5 @@
-# 경로 설정 제거
+# API KEY
 .env
+
+# python 가상환경
+.venv
