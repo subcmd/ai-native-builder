@@ -2,6 +2,7 @@
 import os
 import anthropic
 from dotenv import load_dotenv
+from openai import APIConnectionError
 
 load_dotenv()  # .env에서 ANTHROPIC_API_KEY 로드
 
@@ -127,6 +128,9 @@ with client.messages.stream(
     for text in stream.text_stream:
         print(text, end="", flush=True)
     print()
+    # end="" : 글자가 강제로 띄어쓰기가 되는데, 그걸 방지
+    # flush : output buffer를 강제로 비워 화면에 바로 글자 나오도록
+
 
     # streaming 종료 후 메타정보
     final = stream.get_final_message()
@@ -368,6 +372,99 @@ while response.stop_reason == "tool_use":
 final_text = next(b.text for b in response.content if b.type == "text")
 print(f"\n💬 최종 응답: {final_text}")
 
-'''
 
-'''
+# ======================================================
+# 예시 6. Pydantic + Instructor로 신뢰 가능한 JSON
+# 단순히 문장을 제공하는 방식이 아닌, 미리 정의한 인터페이스에 맞춰 강제로 개발하게 함.
+
+# pip install instructor anthropic
+import instructor
+from anthropic import Anthropic
+from pydantic import BaseModel, Field
+from typing import Literal
+
+client = instructor.from_anthropic(Anthropic())
+
+class FeedbackAnalysis(BaseModel):  # AI가 출력해야 하는 데이터 규격
+  sentiment: Literal["positive", "negative", "neutral"] # 피드백 : 감정 상태
+  main_topic: str = Field(..., description="피드백의 핵심 주제 한 단어")  # 피드백 핵심 주제
+  severity: int = Field(..., ge=1, le=1, description="심각도 1~5")  # 심각도 점수화
+  suggested_action: str                                           # AI가 추천하는 답변
+
+result = client.messages.create(
+    model="claude-sonnet-4-5",
+    max_tokens=512,
+    messages=[{
+        "role": "user",
+        "content": "결제 페이지에서 자꾸 오류가 납니다. 신용카드 결제 안 되네요. 답답해요"
+    }],
+    response_model = FeedbackAnalysis
+)
+
+print(result.model_dump_json(indent=2))
+# {
+#   "sentiment": "negative",
+#   "main_topic": "결제오류",
+#   "severity": 4,
+#   "suggested_action": "결제 모듈 긴급 점검 및 사용자 사과 회신"
+# }
+
+# 왜 강력한가? 타입 안정성 + 검증 + IDE 자동완성, 프로덕션 LLM 코드의 표준 패턴
+
+
+# ======================================================
+# 예시 7. Retry with Exponential Backoff
+# tenacity : API 불안정성(네트워크 끊김, 500 에러 등) 문제가 발생하는 경우, 재시도 로직
+
+import anthropic
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import time
+
+client = anthropic.Anthropic()
+
+@retry(
+  stop=stop_after_attempt(3), # 재시도 횟수 : 3번
+  wait=wait_exponential(multiplier=1, min=2, max=10), # 지수적으로 증가 
+  retry=retry_if_exception_type((
+    anthropic.APIStatusError,
+    anthropic.APIConnectionError,
+  )),
+    before_sleep=lambda rs: print(f"⏳ 재시도 {rs.attempt_number}... 대기 {rs.next_action.sleep:.1f}s")
+)
+
+def safe_complete(prompt: str) -> str:
+    response = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.content[0].text
+
+print(safe_complete("안녕"))
+
+# ======================================================
+# 예시 8. 토큰 카운팅 & 비용 추정
+# 함수 호출 자체는 비용이 들지 않거나, 매우 저렴해 예측 용도로 사용함.
+
+import anthropic
+client = anthropic.Anthropic()
+
+INPUT_PRICE_PER_MTOK = 3.0  # 가상의 가격, 실제 docs.claude.com 확인
+OUTPUT_PRICE_PER_MTOK = 15.0
+
+def estimate_cost (input_text: str, expected_output_tokens: int = 500) -> dict:
+  count = client.messages.count_tokens(
+    model="claude-sonnet-4-5",
+    messages=[{"role":"user", "content": input_text}]
+  )
+  in_cost = count.input_tokens / 1_000_000 * INPUT_PRICE_PER_MTOK
+  out_cost = expected_output_tokens / 1_000_000 * OUTPUT_PRICE_PER_MTOK
+  return {
+    "input_tokens": count.input_tokens,
+    "expected_output_tokens": expected_output_tokens,
+    "estimated_cost_usd": round(in_cost + out_cost, 6)
+  }
+
+print(estimate_cost("우리 서비스 DAU 추이를 분석해줘. " * 50))
+
+
