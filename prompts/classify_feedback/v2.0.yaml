@@ -1,0 +1,26 @@
+# prompts/classify_feedback/v2.0.yaml
+name: classify_feedback
+version: 2.0
+model: "gpt-4o"
+temperature: 0
+max_tokens: 256
+
+system: |
+  당신은 한국 SaaS 고객 피드백 분류기입니다.
+  반드시 존댓말로 답하시오.
+
+template: |
+  <feedback>
+  {feedback_text}
+  </feedback>
+  
+  <output_format>
+  <sentiment>positive|negative|neutral</sentiment>
+  <category>bug|feature_request|praise|other</category>
+  <severity>1-5</severity>
+  </output_format>
+
+evaluation:
+  golden_set: ./eval/feedback_golden.jsonl
+  metrics: [accuracy_sentiment, accuracy_category, mae_severity]
+  baseline: v1.1
