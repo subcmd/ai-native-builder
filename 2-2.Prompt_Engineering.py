@@ -334,3 +334,182 @@ if __name__ == "__main__":
 
 # =============================================================================
 # 5. Self-Consistency (다수결로 안정화)
+
+import os
+from collections import Counter
+from openai import OpenAI  # 최신 SDK 방식
+from dotenv import load_dotenv
+
+load_dotenv()
+# OpenAI 클라이언트 인스턴스 생성
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+MODEL = "gpt-4o-mini"
+
+def classify_with_consistency(text: str, n_samples: int = 5) -> dict:
+    """같은 질문을 n번 던져 다수결 -> 신뢰도 측정"""
+    prompt = f"<text>{text}</text>\n\npositive/negative/neutral 중 하나만 답:"
+
+    answers = []
+    for _ in range(n_samples):
+        resp = client.chat.completions.create(
+            model = MODEL,
+            max_tokens=10,
+            temperature=0.7, # 다양성 위해 높임
+            messages=[{"role": "user", "content": prompt}]
+        )
+        answers = resp.choices[0].message.content.strip().lower()
+
+    counter = Counter(answers)
+    most_common, count = counter.most_common(1)[0]
+    
+    return {
+        "answer": most_common,
+        "confidence": count / n_samples,
+        "all_answers": dict(counter)
+    }
+
+print(classify_with_consistency("배송 진짜 빨라요!"))
+print(classify_with_consistency("배송은 늦었지만 제품은 만족"))
+
+# {'answer': 'i', 'confidence': 0.4, 'all_answers': {'p': 1, 'o': 1, 's': 1, 'i': 2, 't': 1, 'v': 1, 'e': 1}}
+# {'answer': 'i', 'confidence': 0.4, 'all_answers': {'p': 1, 'o': 1, 's': 1, 'i': 2, 't': 1, 'v': 1, 'e': 1}}
+
+## 가치 : 단일 호출의 노이즈를 줄이고, 신뢰도 점수까지 얻음. 비용은 n배
+
+
+# =============================================================================
+# 6.  Critique-and-Revise
+
+import os
+from openai import OpenAI  # 최신 SDK 방식
+from dotenv import load_dotenv
+
+load_dotenv()
+# OpenAI 클라이언트 인스턴스 생성
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+MODEL = "gpt-4o-mini"
+
+def write_with_critique(topic: str) -> str:
+    # 1단계: 초안
+    draft= client.chat.completions.create(
+        model = MODEL,
+        max_tokens = 500,
+        temperature = 0.3,
+        messages = [{"role": "user", "content": f"{topic}에 대한 PM 보고서 초안을 1단락으로 작성"}]
+    )
+    draft.choices[0].message.content
+
+    # 2단계: 비판
+    critique_prompt = f"""다음 PM 보고서 초안을 평가하시오.
+    평가 기준: 명확성, 데이터 근거, 액션 아이템 포함 여부, 길이 적절성
+
+    <draft>
+    {draft}
+    </draft>
+
+    <critique>"""
+    
+    critique = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=300,
+        temperature=0,
+        messages=[{"role": "user", "content": critique_prompt}]
+    )
+    critique.choices[0].message.content
+    
+    # 3단계: 개선
+    revise_prompt = f"""<draft>{draft}</draft>
+    <critique>{critique}</critique>
+
+    위 비판을 반영해 개선된 보고서를 작성:"""
+
+    final = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=500,
+        temperature=0.3,
+        messages=[{"role": "user", "content": revise_prompt}]
+    )
+    final.choices[0].message.content
+
+    return final
+
+print(write_with_critique("신규 유저를 위한 온보딩 프로세스 개선 프로젝트"))
+
+## 비용은 3배지만 품질 향상이 큰 작업 (보고서, 이메일, 분석 글 등에 효과적)
+## 현재 우리가 진행해야 하는 edutech 프로젝트에서 도움이 될거라 생각함.
+
+# =============================================================================
+# 7. 평가셋으로 두 프롬프트 비교
+
+import os
+import json
+from pathlib import Path
+from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+MODEL = "gpt-4o-mini"
+
+# 현재 파일(main.py)이 있는 위치를 기준으로 경로 자동 설정
+BASE_DIR = Path(__file__).parent
+GOLDEN_PATH = BASE_DIR / "eval" / "feedback_golden.jsonl"
+
+def evaluate_prompt(prompt_template: str, golden_path: str) -> dict:
+    correct = 0
+    total = 0
+    errors = []
+    
+    path = Path(golden_path)
+    
+    # [방어 로직] 파일이 없으면 에러 메시지 반환
+    if not path.exists():
+        return {"error": f"파일을 찾을 수 없습니다: {path.absolute()}"}
+
+    # 파일 읽기 (인코딩 명시 권장)
+    content = path.read_text(encoding='utf-8')
+    
+    for line in content.splitlines():
+        if not line.strip(): continue
+        
+        item = json.loads(line)
+        rendered = prompt_template.format(**item)
+        
+        resp = client.chat.completions.create(
+            model=MODEL, 
+            max_tokens=10, 
+            temperature=0,
+            messages=[{"role": "user", "content": rendered}]
+        )
+        
+        # [수정] .text -> .message.content
+        prediction = resp.choices[0].message.content.strip().lower().replace('.', '')
+        expected = item["expected"].strip().lower()
+        
+        if prediction == expected:
+            correct += 1
+        else:
+            errors.append({
+                "input": item.get("input", "")[:50],
+                "expected": expected,
+                "got": prediction
+            })
+        total += 1
+    
+    return {
+        "accuracy": correct / total if total > 0 else 0,
+        "n": total,
+        "errors": errors[:5]
+    }
+
+# 실행 부분
+v1 = "다음 감성을 분류: {input}"
+v2 = """<input>{input}</input>\npositive/negative/neutral 중 하나로 답하세요."""
+
+# [중요] 경로 앞에 r을 붙여서 SyntaxError 방지
+# 하지만 위에서 설정한 GOLDEN_PATH 변수를 사용하는 것이 가장 깔끔합니다.
+print("v1 결과:", evaluate_prompt(v1, GOLDEN_PATH))
+print("v2 결과:", evaluate_prompt(v2, GOLDEN_PATH))
